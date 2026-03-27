@@ -19,7 +19,12 @@ export default function Sidebar({
   canUndo,
   isFinished,
   onFinish,
+  onAutoMatch,
   onRemoveMid,
+  autonomousRunning,
+  onToggleAutonomous,
+  zoomLevel,
+  onZoomLevelChange,
 }) {
   const discrepancy = startCount !== endCount;
   const progressPct = totalStartPoints > 0 ? (processedCount / totalStartPoints) * 100 : 0;
@@ -27,7 +32,30 @@ export default function Sidebar({
   return (
     <div className="sidebar">
       <div className="sidebar-section">
-        <h2>Section Control Tool</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h2 style={{ marginBottom: 0 }}>Section Control Tool</h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {autonomousRunning && (
+              <span className="autonomous-pulse" />
+            )}
+            <span style={{
+              fontSize: 11,
+              color: autonomousRunning ? '#d97706' : '#6b7280',
+              fontWeight: 500,
+              whiteSpace: 'nowrap',
+            }}>
+              Autonomous Mode
+            </span>
+            <button
+              className={`btn ${autonomousRunning ? 'btn-warning' : 'btn-secondary'}`}
+              style={{ fontSize: '0.7em', padding: '2px 10px' }}
+              onClick={onToggleAutonomous}
+              disabled={isFinished || !currentStartPoint}
+            >
+              {autonomousRunning ? 'Stop' : 'Start'}
+            </button>
+          </div>
+        </div>
         <div className="info-row"><span className="info-label">Country</span><span className="info-value">{getCountryLabel(country)}</span></div>
         <div className="info-row"><span className="info-label">Total cameras</span><span className="info-value">{totalCameras}</span></div>
         <div className="info-row">
@@ -56,7 +84,37 @@ export default function Sidebar({
       {!isFinished && currentStartPoint && (
         <>
           <div className="sidebar-section">
-            <h3>Current Road: {currentRoadRef}</h3>
+            <h3 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Current Road: {currentRoadRef}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <kbd style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  width: 22, height: 22, borderRadius: 4,
+                  background: '#e5e7eb', border: '1px solid #d1d5db',
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+                  fontSize: 11, fontWeight: 600, fontFamily: 'inherit', color: '#374151',
+                }}>M</kbd>
+                <button className="btn btn-secondary" style={{ fontSize: '0.8em', padding: '4px 12px' }} onClick={onAutoMatch} disabled={autonomousRunning}>
+                  Auto Match
+                </button>
+              </span>
+            </h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+              <span className="info-label" style={{ fontSize: 12 }}>Zoom level</span>
+              <select
+                value={zoomLevel}
+                onChange={(e) => onZoomLevelChange(Number(e.target.value))}
+                style={{
+                  padding: '2px 6px', borderRadius: 4,
+                  border: '1px solid #d1d5db', fontSize: 12,
+                  background: '#fff', color: '#374151',
+                }}
+              >
+                {[7, 8, 9, 10, 11, 12, 13, 14].map((z) => (
+                  <option key={z} value={z}>{z}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div className="sidebar-section">
@@ -65,7 +123,17 @@ export default function Sidebar({
           </div>
 
           <div className="sidebar-section">
-            <h3>Selected End Point</h3>
+            <h3 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Selected End Point</span>
+              {selectedEndFeature && (() => {
+                const startId = String(currentStartPoint.properties.id);
+                const endId = String(selectedEndFeature.properties.id);
+                const matches = endId.includes(startId);
+                return matches
+                  ? <span style={{ color: '#16a34a', fontWeight: 'bold', fontSize: '1em' }}>ID match</span>
+                  : <span style={{ color: '#f59e0b', fontSize: '1em' }}>No ID match</span>;
+              })()}
+            </h3>
             {selectedEndFeature ? (
               <PointInfo feature={selectedEndFeature} />
             ) : (
@@ -79,25 +147,33 @@ export default function Sidebar({
               <p className="hint">Click blue points on the map to add mid points (optional)</p>
             ) : (
               <ul className="mid-list">
-                {selectedMidFeatures.map((f, i) => (
-                  <li key={f.properties.id}>
-                    <span className="mid-order">{i + 1}</span>
-                    <span className="mid-id">ID: {f.properties.id}</span>
-                    <button className="btn-remove" onClick={() => onRemoveMid(f.properties.id)}>&times;</button>
-                  </li>
-                ))}
+                {selectedMidFeatures.map((f, i) => {
+                  const startId = String(currentStartPoint.properties.id);
+                  const midId = String(f.properties.id);
+                  const matches = midId.includes(startId);
+                  return (
+                    <li key={f.properties.id}>
+                      <span className="mid-order">{i + 1}</span>
+                      <span className="mid-id">ID: {f.properties.id}</span>
+                      {matches
+                        ? <span style={{ marginLeft: 6, color: '#16a34a', fontWeight: 'bold', fontSize: '0.85em' }}>ID match</span>
+                        : <span style={{ marginLeft: 6, color: '#f59e0b', fontSize: '0.85em' }}>No ID match</span>}
+                      <button className="btn-remove" onClick={() => onRemoveMid(f.properties.id)} disabled={autonomousRunning}>&times;</button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
 
           <div className="sidebar-actions">
-            <button className="btn btn-primary" onClick={onContinue} disabled={!canContinue}>
+            <button className="btn btn-primary" onClick={onContinue} disabled={!canContinue || autonomousRunning}>
               Continue
             </button>
-            <button className="btn btn-warning" onClick={onNoEndPoint}>
+            <button className="btn btn-warning" onClick={onNoEndPoint} disabled={autonomousRunning}>
               No End Point
             </button>
-            <button className="btn btn-secondary" onClick={onUndo} disabled={!canUndo}>
+            <button className="btn btn-secondary" onClick={onUndo} disabled={!canUndo || autonomousRunning}>
               Undo
             </button>
           </div>

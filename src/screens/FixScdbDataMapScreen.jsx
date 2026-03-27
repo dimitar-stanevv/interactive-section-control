@@ -3,9 +3,41 @@ import Map, { Source, Layer } from 'react-map-gl/mapbox';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import Sidebar from '../components/Sidebar';
 import { saveProgress, loadProgress } from '../utils/storage';
+import { haversineMeters } from '../utils/geo';
 import config from '../../config.json';
 
 const MAPBOX_TOKEN = config.mapbox_access_token;
+
+function findClosestEndPoint(startFeature, endPoints, processedPointIds) {
+  const [startLng, startLat] = startFeature.geometry.coordinates;
+  const startRoadRef = startFeature.properties?.osm_road?.road_ref;
+  const MIN_DISTANCE_M = 300;
+  let closest = null;
+  let minDist = Infinity;
+  for (const ep of endPoints) {
+    if (processedPointIds.has(ep.properties.id)) continue;
+    const epRoadRef = ep.properties?.osm_road?.road_ref;
+    if (startRoadRef && epRoadRef !== startRoadRef) continue;
+    const [lng, lat] = ep.geometry.coordinates;
+    const dist = haversineMeters(startLat, startLng, lat, lng);
+    if (dist < MIN_DISTANCE_M) continue;
+    if (dist < minDist) {
+      minDist = dist;
+      closest = ep;
+    }
+  }
+  return closest;
+}
+
+function hasNearbyMidPoints(startFeature, midPoints, processedPointIds, thresholdM = 20000) {
+  const [startLng, startLat] = startFeature.geometry.coordinates;
+  for (const mp of midPoints) {
+    if (processedPointIds.has(mp.properties.id)) continue;
+    const [lng, lat] = mp.geometry.coordinates;
+    if (haversineMeters(startLat, startLng, lat, lng) <= thresholdM) return true;
+  }
+  return false;
+}
 
 function buildStartPointOrder(startPoints) {
   const groups = {};
@@ -38,7 +70,7 @@ function buildStartPointOrder(startPoints) {
   return ordered;
 }
 
-export default function MapScreen({ geojsonData, country, onComplete }) {
+export default function FixScdbDataMapScreen({ geojsonData, country, onComplete }) {
   const mapRef = useRef(null);
 
   const countryFeatures = useMemo(() => {
@@ -64,6 +96,22 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
   const [selectedEndId, setSelectedEndId] = useState(null);
   const [selectedMidIds, setSelectedMidIds] = useState([]);
   const [isFinished, setIsFinished] = useState(false);
+  const [toastMessage, setToastMessage] = useState(null);
+  const toastTimerRef = useRef(null);
+  const [zoomLevel, setZoomLevel] = useState(10);
+
+  const [autonomousRunning, setAutonomousRunning] = useState(false);
+  const autonomousRunningRef = useRef(false);
+  const autonomousTimerRef = useRef(null);
+
+  const stopAutonomous = useCallback(() => {
+    autonomousRunningRef.current = false;
+    setAutonomousRunning(false);
+    if (autonomousTimerRef.current) {
+      clearTimeout(autonomousTimerRef.current);
+      autonomousTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     const saved = loadProgress(country);
@@ -119,10 +167,28 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
 
   const handleContinue = useCallback(() => {
     if (!selectedEndId || !currentStartPoint) return;
+    stopAutonomous();
     const endFeature = endPoints.find((f) => f.properties.id === selectedEndId);
+
     const midFeatures = selectedMidIds
       .map((id) => midPoints.find((f) => f.properties.id === id))
       .filter(Boolean);
+
+    const startId = String(currentStartPoint.properties.id);
+    const mismatches = [];
+    if (!String(endFeature.properties.id).includes(startId)) {
+      mismatches.push(`End point ID (${endFeature.properties.id})`);
+    }
+    for (const mf of midFeatures) {
+      if (!String(mf.properties.id).includes(startId)) {
+        mismatches.push(`Mid point ID (${mf.properties.id})`);
+      }
+    }
+    if (mismatches.length > 0) {
+      if (!window.confirm(`The following IDs do not contain the start point ID (${startId}):\n\n${mismatches.join('\n')}\n\nAre you sure you want to continue?`)) {
+        return;
+      }
+    }
 
     const newSection = {
       start: currentStartPoint,
@@ -133,17 +199,38 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
     const newSections = [...completedSections, newSection];
     setCompletedSections(newSections);
     advanceToNext(newSections, danglingStartPoints, currentStartIndex + 1);
-  }, [selectedEndId, currentStartPoint, endPoints, midPoints, selectedMidIds, completedSections, danglingStartPoints, currentStartIndex, advanceToNext]);
+  }, [selectedEndId, currentStartPoint, endPoints, midPoints, selectedMidIds, completedSections, danglingStartPoints, currentStartIndex, advanceToNext, stopAutonomous]);
 
   const handleNoEndPoint = useCallback(() => {
     if (!currentStartPoint) return;
+    const id = currentStartPoint.properties.id;
+    if (!window.confirm(`Dismiss start point "${id}" with no matching end point?\n\nIt will appear as a dangling point in the export.`)) return;
+    stopAutonomous();
     const newDangling = [...danglingStartPoints, currentStartPoint];
     setDanglingStartPoints(newDangling);
     advanceToNext(completedSections, newDangling, currentStartIndex + 1);
-  }, [currentStartPoint, danglingStartPoints, completedSections, currentStartIndex, advanceToNext]);
+  }, [currentStartPoint, danglingStartPoints, completedSections, currentStartIndex, advanceToNext, stopAutonomous]);
+
+  const showToast = useCallback((msg) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToastMessage(msg);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 3000);
+  }, []);
+
+  const handleAutoMatch = useCallback(() => {
+    if (!currentStartPoint) return;
+    stopAutonomous();
+    const closest = findClosestEndPoint(currentStartPoint, endPoints, processedPointIds);
+    if (closest) {
+      setSelectedEndId(closest.properties.id);
+    } else {
+      showToast('No matching end point found (same road, ≥300m away)');
+    }
+  }, [currentStartPoint, endPoints, processedPointIds, showToast, stopAutonomous]);
 
   const handleUndo = useCallback(() => {
     if (completedSections.length === 0 && danglingStartPoints.length === 0) return;
+    stopAutonomous();
 
     const prevIdx = currentStartIndex - 1;
     if (prevIdx < 0) return;
@@ -173,7 +260,7 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
       setIsFinished(false);
       persist(newSections, danglingStartPoints, prevIdx);
     }
-  }, [completedSections, danglingStartPoints, currentStartIndex, orderedStartPoints, persist]);
+  }, [completedSections, danglingStartPoints, currentStartIndex, orderedStartPoints, persist, stopAutonomous]);
 
   const handleFinish = useCallback(() => {
     const usedEndIds = new Set();
@@ -189,6 +276,103 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
     });
   }, [completedSections, danglingStartPoints, endPoints, onComplete]);
 
+  // --- Autonomous Mode ---
+  const stateRef = useRef({});
+  stateRef.current = {
+    currentStartPoint, endPoints, midPoints, processedPointIds,
+    completedSections, danglingStartPoints, currentStartIndex, isFinished,
+  };
+  const callbacksRef = useRef({});
+  callbacksRef.current = { advanceToNext, showToast };
+
+  const autonomousTickRef = useRef(null);
+  autonomousTickRef.current = () => {
+    const s = stateRef.current;
+    const { advanceToNext: advance, showToast: toast } = callbacksRef.current;
+
+    if (!autonomousRunningRef.current || s.isFinished || !s.currentStartPoint) {
+      stopAutonomous();
+      return;
+    }
+
+    const matched = findClosestEndPoint(s.currentStartPoint, s.endPoints, s.processedPointIds);
+    if (!matched) {
+      toast('Autonomous stopped: no matching end point');
+      stopAutonomous();
+      return;
+    }
+
+    setSelectedEndId(matched.properties.id);
+
+    const [startLng, startLat] = s.currentStartPoint.geometry.coordinates;
+    const [endLng, endLat] = matched.geometry.coordinates;
+    const startToEndDist = haversineMeters(startLat, startLng, endLat, endLng);
+
+    autonomousTimerRef.current = setTimeout(() => {
+      if (!autonomousRunningRef.current) return;
+      const s2 = stateRef.current;
+
+      if (!s2.currentStartPoint) { stopAutonomous(); return; }
+
+      if (hasNearbyMidPoints(s2.currentStartPoint, s2.midPoints, s2.processedPointIds, startToEndDist)) {
+        callbacksRef.current.showToast('Autonomous stopped: mid points closer than matched end point');
+        stopAutonomous();
+        return;
+      }
+
+      const startId = String(s2.currentStartPoint.properties.id);
+      if (!String(matched.properties.id).includes(startId)) {
+        callbacksRef.current.showToast('Autonomous stopped: end point ID mismatch');
+        stopAutonomous();
+        return;
+      }
+
+      const newSection = { start: s2.currentStartPoint, end: matched, midPoints: [] };
+      const newSections = [...s2.completedSections, newSection];
+      setCompletedSections(newSections);
+      callbacksRef.current.advanceToNext(newSections, s2.danglingStartPoints, s2.currentStartIndex + 1);
+
+      autonomousTimerRef.current = setTimeout(() => {
+        if (!autonomousRunningRef.current) return;
+        autonomousTickRef.current();
+      }, 1000);
+    }, 1000);
+  };
+
+  const handleToggleAutonomous = useCallback(() => {
+    if (autonomousRunningRef.current) {
+      stopAutonomous();
+    } else {
+      autonomousRunningRef.current = true;
+      setAutonomousRunning(true);
+      autonomousTickRef.current();
+    }
+  }, [stopAutonomous]);
+
+  useEffect(() => {
+    if (isFinished && autonomousRunningRef.current) {
+      stopAutonomous();
+    }
+  }, [isFinished, stopAutonomous]);
+
+  useEffect(() => {
+    return () => {
+      if (autonomousTimerRef.current) clearTimeout(autonomousTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'm' || e.key === 'M') {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (autonomousRunningRef.current) return;
+        handleAutoMatch();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleAutoMatch]);
+
   const prevStartIdRef = useRef(null);
   useEffect(() => {
     if (!currentStartPoint) return;
@@ -198,11 +382,11 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
 
     if (!mapRef.current) return;
     const [lng, lat] = currentStartPoint.geometry.coordinates;
-    mapRef.current.flyTo({ center: [lng, lat], zoom: 13, duration: 1000 });
-  }, [currentStartPoint]);
+    mapRef.current.flyTo({ center: [lng, lat], zoom: zoomLevel, duration: 1000 });
+  }, [currentStartPoint, zoomLevel]);
 
   const handleMapClick = useCallback((e) => {
-    if (isFinished) return;
+    if (isFinished || autonomousRunningRef.current) return;
     const map = mapRef.current;
     if (!map) return;
 
@@ -218,6 +402,8 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
 
     if (processedPointIds.has(clickedId)) return;
 
+    stopAutonomous();
+
     if (clickedType === 'section_end') {
       setSelectedEndId((prev) => (prev === clickedId ? null : clickedId));
     } else if (clickedType === 'section_mid') {
@@ -228,7 +414,7 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
         return [...prev, clickedId];
       });
     }
-  }, [isFinished, processedPointIds]);
+  }, [isFinished, processedPointIds, stopAutonomous]);
 
   const allPointsGeoJson = useMemo(() => {
     const features = countryFeatures.map((f) => {
@@ -257,7 +443,7 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
       return {
         longitude: currentStartPoint.geometry.coordinates[0],
         latitude: currentStartPoint.geometry.coordinates[1],
-        zoom: 13,
+        zoom: 10,
       };
     }
     if (countryFeatures.length > 0) {
@@ -304,9 +490,14 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
         canUndo={currentStartIndex > 0}
         isFinished={isFinished}
         onFinish={handleFinish}
+        onAutoMatch={handleAutoMatch}
         onRemoveMid={(id) => {
           setSelectedMidIds((prev) => prev.filter((mid) => mid !== id));
         }}
+        autonomousRunning={autonomousRunning}
+        onToggleAutonomous={handleToggleAutonomous}
+        zoomLevel={zoomLevel}
+        onZoomLevelChange={setZoomLevel}
       />
       <div className="map-container">
         <Map
@@ -475,6 +666,15 @@ export default function MapScreen({ geojsonData, country, onComplete }) {
           </Source>
         </Map>
       </div>
+      {toastMessage && (
+        <div style={{
+          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          background: '#333', color: '#fff', padding: '10px 20px', borderRadius: 8,
+          fontSize: 14, zIndex: 9999, boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+        }}>
+          {toastMessage}
+        </div>
+      )}
     </div>
   );
 }
