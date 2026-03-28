@@ -81,6 +81,8 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
   const [isFinished, setIsFinished] = useState(false);
   const [toastMessage, setToastMessage] = useState(null);
   const [storageWarning, setStorageWarning] = useState(false);
+  const [removedMidIndices, setRemovedMidIndices] = useState(new Set());
+  const [customDescription, setCustomDescription] = useState('');
   const toastTimerRef = useRef(null);
   const fetchIdRef = useRef(0);
 
@@ -102,6 +104,13 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
 
   const currentSection = sections[currentSectionIndex] || null;
 
+  const effectiveCurrentSection = useMemo(() => {
+    if (!currentSection) return null;
+    if (removedMidIndices.size === 0) return currentSection;
+    const filteredMids = (currentSection.mid_points || []).filter((_, i) => !removedMidIndices.has(i));
+    return { ...currentSection, mid_points: filteredMids };
+  }, [currentSection, removedMidIndices]);
+
   const processedOriginalIndices = useMemo(() => {
     const set = new Set();
     for (const ps of processedSections) {
@@ -111,8 +120,8 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
   }, [processedSections]);
 
   const warnings = useMemo(
-    () => computeWarnings(currentDirectionsResult, currentSection),
-    [currentDirectionsResult, currentSection]
+    () => computeWarnings(currentDirectionsResult, effectiveCurrentSection),
+    [currentDirectionsResult, effectiveCurrentSection]
   );
 
   const persist = useCallback((processed, moved, orderIdx, disregarded) => {
@@ -130,6 +139,52 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
     setToastMessage(msg);
     toastTimerRef.current = setTimeout(() => setToastMessage(null), 4000);
   }, []);
+
+  const handleRemoveSplitPoint = useCallback((midIndex) => {
+    if (!currentSection) return;
+    const newRemoved = new Set(removedMidIndices);
+    newRemoved.add(midIndex);
+    setRemovedMidIndices(newRemoved);
+
+    const filteredMids = (currentSection.mid_points || []).filter((_, i) => !newRemoved.has(i));
+    const section = { ...currentSection, mid_points: filteredMids };
+    setCurrentDirectionsResult(null);
+    setIsLoadingDirections(true);
+    setDirectionsError(null);
+    const id = ++fetchIdRef.current;
+    fetchAllDirections(section, movedPoints).then((result) => {
+      if (fetchIdRef.current !== id) return;
+      setCurrentDirectionsResult(result);
+      setIsLoadingDirections(false);
+    }).catch((err) => {
+      if (fetchIdRef.current !== id) return;
+      setDirectionsError(err.message);
+      setIsLoadingDirections(false);
+    });
+  }, [currentSection, removedMidIndices, movedPoints]);
+
+  const handleRemoveAllSplitPoints = useCallback(() => {
+    if (!currentSection) return;
+    const mids = currentSection.mid_points || [];
+    if (mids.length === 0) return;
+
+    setRemovedMidIndices(new Set(mids.map((_, i) => i)));
+
+    const section = { ...currentSection, mid_points: [] };
+    setCurrentDirectionsResult(null);
+    setIsLoadingDirections(true);
+    setDirectionsError(null);
+    const id = ++fetchIdRef.current;
+    fetchAllDirections(section, movedPoints).then((result) => {
+      if (fetchIdRef.current !== id) return;
+      setCurrentDirectionsResult(result);
+      setIsLoadingDirections(false);
+    }).catch((err) => {
+      if (fetchIdRef.current !== id) return;
+      setDirectionsError(err.message);
+      setIsLoadingDirections(false);
+    });
+  }, [currentSection, movedPoints]);
 
   const doFetchDirections = useCallback(async (section, moved) => {
     const id = ++fetchIdRef.current;
@@ -162,14 +217,14 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
 
   const prevOrderIdxRef = useRef(null);
   useEffect(() => {
-    if (!currentSection) return;
+    if (!effectiveCurrentSection) return;
     if (currentOrderIndex === prevOrderIdxRef.current) return;
     prevOrderIdxRef.current = currentOrderIndex;
 
     if (!mapRef.current) return;
 
-    const midPoints = currentSection.mid_points || [];
-    const allPoints = [currentSection.start, ...midPoints, currentSection.end];
+    const midPoints = effectiveCurrentSection.mid_points || [];
+    const allPoints = [effectiveCurrentSection.start, ...midPoints, effectiveCurrentSection.end];
     const coords = allPoints.map((p) => getPointCoords(p, movedPoints));
 
     if (coords.length === 1) {
@@ -188,10 +243,10 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
       [[minLng, minLat], [maxLng, maxLat]],
       { padding: { top: 80, bottom: 80, left: 80, right: 80 }, duration: 1000, maxZoom: 14 }
     );
-  }, [currentOrderIndex, currentSection, movedPoints]);
+  }, [currentOrderIndex, effectiveCurrentSection, movedPoints]);
 
   const handleContinue = useCallback(() => {
-    if (!currentDirectionsResult || !currentSection) return;
+    if (!currentDirectionsResult || !effectiveCurrentSection) return;
 
     if (warnings.length > 0) {
       const proceed = window.confirm(
@@ -200,8 +255,8 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
       if (!proceed) return;
     }
 
-    const midPoints = currentSection.mid_points || [];
-    const allPoints = [currentSection.start, ...midPoints, currentSection.end];
+    const midPoints = effectiveCurrentSection.mid_points || [];
+    const allPoints = [effectiveCurrentSection.start, ...midPoints, effectiveCurrentSection.end];
 
     const subSectionFeatures = currentDirectionsResult.subSections.map((sub, i) => ({
       startPoint: allPoints[i],
@@ -216,17 +271,20 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
 
     const newProcessed = [...processedSections, {
       originalIndex: currentSectionIndex,
-      section: currentSection,
+      section: effectiveCurrentSection,
       subSectionFeatures,
-      warnings: computeWarnings(currentDirectionsResult, currentSection),
+      warnings: computeWarnings(currentDirectionsResult, effectiveCurrentSection),
       movedPointIds: Object.keys(movedPoints).filter((id) => {
         const allIds = allPoints.map((p) => p.properties?.id).filter(Boolean);
         return allIds.includes(id);
       }),
+      customDescription: customDescription.trim() || null,
     }];
 
     const nextOrderIdx = currentOrderIndex + 1;
     setProcessedSections(newProcessed);
+    setRemovedMidIndices(new Set());
+    setCustomDescription('');
 
     if (nextOrderIdx >= sectionOrder.length) {
       setCurrentOrderIndex(nextOrderIdx);
@@ -237,7 +295,7 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
       setCurrentDirectionsResult(null);
       persist(newProcessed, movedPoints, nextOrderIdx, disregardedIndices);
     }
-  }, [currentDirectionsResult, currentSection, currentSectionIndex, currentOrderIndex, processedSections, sectionOrder.length, movedPoints, persist, warnings, disregardedIndices]);
+  }, [currentDirectionsResult, effectiveCurrentSection, currentSectionIndex, currentOrderIndex, processedSections, sectionOrder.length, movedPoints, persist, warnings, disregardedIndices, customDescription]);
 
   const handleDisregard = useCallback(() => {
     if (!currentSection) return;
@@ -248,6 +306,7 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
 
     const newDisregarded = [...disregardedIndices, currentSectionIndex];
     setDisregardedIndices(newDisregarded);
+    setRemovedMidIndices(new Set());
 
     const nextOrderIdx = currentOrderIndex + 1;
     if (nextOrderIdx >= sectionOrder.length) {
@@ -265,6 +324,8 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
     if (currentOrderIndex <= 0) return;
     const prevOrderIdx = currentOrderIndex - 1;
     const prevOriginalIdx = sectionOrder[prevOrderIdx];
+
+    setRemovedMidIndices(new Set());
 
     if (disregardedIndices.length > 0 && disregardedIndices[disregardedIndices.length - 1] === prevOriginalIdx) {
       const newDisregarded = disregardedIndices.slice(0, -1);
@@ -290,6 +351,12 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
     for (const ps of processedSections) {
       if (ps.warnings.length > 0) warningCount++;
 
+      const sectionStartProps = ps.section.start.properties || {};
+      const sectionEndProps = ps.section.end.properties || {};
+      const movedIds = ps.movedPointIds || [];
+      const originalStartId = sectionStartProps.id || null;
+      const originalEndId = sectionEndProps.id || null;
+
       for (let i = 0; i < ps.subSectionFeatures.length; i++) {
         const sub = ps.subSectionFeatures[i];
         const startProps = sub.startPoint.properties || {};
@@ -299,22 +366,28 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
           type: 'Feature',
           geometry: sub.geometry,
           properties: {
-            section_id: `${startProps.id || 'unknown'}_to_${endProps.id || 'unknown'}`,
-            start_id: startProps.id,
-            end_id: endProps.id,
-            start_coordinates: sub.startCoords,
-            end_coordinates: sub.endCoords,
-            max_speed: startProps.max_speed ?? endProps.max_speed ?? null,
-            is_variable: startProps.is_variable ?? endProps.is_variable ?? false,
-            road_ref: startProps.osm_road?.road_ref || endProps.osm_road?.road_ref || null,
-            road_class: startProps.osm_road?.road_class || endProps.osm_road?.road_class || null,
-            distance_m: Math.round(sub.distance),
-            duration_s: Math.round(sub.duration),
+            original_start_point_id: originalStartId,
+            original_end_point_id: originalEndId,
+            max_speed: sectionStartProps.max_speed ?? null,
+            is_variable: sectionStartProps.is_variable ?? false,
+            distance: Math.round(sub.distance),
             country,
-            original_section_index: ps.originalIndex,
-            sub_section_index: i,
-            total_sub_sections: ps.subSectionFeatures.length,
-            was_point_moved: (ps.movedPointIds || []).length > 0,
+            rev_geocode: sectionStartProps.rev_geocode || null,
+            osm_road: sectionStartProps.osm_road || null,
+            description: sectionStartProps.description || null,
+            custom_description: ps.customDescription ?? null,
+            start_point: {
+              id: startProps.id || null,
+              lat: sub.startCoords[1],
+              lng: sub.startCoords[0],
+              is_moved: movedIds.includes(startProps.id),
+            },
+            end_point: {
+              id: endProps.id || null,
+              lat: sub.endCoords[1],
+              lng: sub.endCoords[0],
+              is_moved: movedIds.includes(endProps.id),
+            },
           },
         });
       }
@@ -336,11 +409,10 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
       setIsMovingPoint(null);
       showToast('Point repositioned. Fetching new route...');
 
-      const section = sections[currentSectionIndex];
-      if (section) {
+      if (effectiveCurrentSection) {
         const updatedMoved = { ...movedPoints, [isMovingPoint.pointId]: newCoords };
         setMovedPoints(updatedMoved);
-        doFetchDirections(section, updatedMoved);
+        doFetchDirections(effectiveCurrentSection, updatedMoved);
       }
       return;
     }
@@ -358,7 +430,7 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
 
     setIsMovingPoint({ pointId: clickedId, type: clicked.properties._pointType });
     showToast('Click on the map to reposition the point. Press Escape to cancel.');
-  }, [isFinished, isMovingPoint, currentSectionIndex, sections, movedPoints, doFetchDirections, showToast]);
+  }, [isFinished, isMovingPoint, effectiveCurrentSection, movedPoints, doFetchDirections, showToast]);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -470,31 +542,31 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
   }, [currentDirectionsResult]);
 
   const currentPointsGeoJson = useMemo(() => {
-    if (!currentSection) return { type: 'FeatureCollection', features: [] };
-    const midPoints = currentSection.mid_points || [];
+    if (!effectiveCurrentSection) return { type: 'FeatureCollection', features: [] };
+    const midPoints = effectiveCurrentSection.mid_points || [];
     const features = [];
 
-    const startCoords = getPointCoords(currentSection.start, movedPoints);
+    const startCoords = getPointCoords(effectiveCurrentSection.start, movedPoints);
     features.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: startCoords },
       properties: {
         _pointType: 'start',
-        _pointId: currentSection.start.properties?.id || 'start',
+        _pointId: effectiveCurrentSection.start.properties?.id || 'start',
         _label: 'A',
-        _isMoving: isMovingPoint?.pointId === (currentSection.start.properties?.id || 'start'),
+        _isMoving: isMovingPoint?.pointId === (effectiveCurrentSection.start.properties?.id || 'start'),
       },
     });
 
-    const endCoords = getPointCoords(currentSection.end, movedPoints);
+    const endCoords = getPointCoords(effectiveCurrentSection.end, movedPoints);
     features.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: endCoords },
       properties: {
         _pointType: 'end',
-        _pointId: currentSection.end.properties?.id || 'end',
+        _pointId: effectiveCurrentSection.end.properties?.id || 'end',
         _label: 'B',
-        _isMoving: isMovingPoint?.pointId === (currentSection.end.properties?.id || 'end'),
+        _isMoving: isMovingPoint?.pointId === (effectiveCurrentSection.end.properties?.id || 'end'),
       },
     });
 
@@ -513,7 +585,7 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
     });
 
     return { type: 'FeatureCollection', features };
-  }, [currentSection, movedPoints, isMovingPoint]);
+  }, [effectiveCurrentSection, movedPoints, isMovingPoint]);
 
   const initialViewState = useMemo(() => {
     if (currentSection) {
@@ -537,7 +609,9 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
         totalSections={sections.length}
         processedCount={currentOrderIndex}
         currentSectionIndex={currentOrderIndex}
-        currentSection={currentSection}
+        currentSection={effectiveCurrentSection}
+        originalMidPoints={currentSection?.mid_points || []}
+        removedMidIndices={removedMidIndices}
         directionsResult={currentDirectionsResult}
         isLoadingDirections={isLoadingDirections}
         directionsError={directionsError}
@@ -547,11 +621,15 @@ export default function PolylineMapScreen({ sectionsData, prefetchedResults, onC
         onContinue={handleContinue}
         onDisregard={handleDisregard}
         onUndo={handleUndo}
+        onRemoveSplitPoint={handleRemoveSplitPoint}
+        onRemoveAllSplitPoints={handleRemoveAllSplitPoints}
         canContinue={!!currentDirectionsResult && !isLoadingDirections && !isFinished}
         canUndo={currentOrderIndex > 0}
         onFinish={handleFinish}
         storageWarning={storageWarning}
         disregardedCount={disregardedIndices.length}
+        customDescription={customDescription}
+        onCustomDescriptionChange={setCustomDescription}
       />
       <div className="map-container">
         <Map

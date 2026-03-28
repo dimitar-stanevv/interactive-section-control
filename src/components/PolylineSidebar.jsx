@@ -2,6 +2,30 @@ import { getCountryLabel } from '../utils/countries';
 import { formatDistance } from '../utils/geo';
 import { getStorageUsageBytes, formatStorageSize } from '../utils/storage';
 
+function SpeedLimitSign({ maxSpeed }) {
+  const isEmpty = maxSpeed == null;
+  return (
+    <div style={{
+      width: 44, height: 44, borderRadius: '50%',
+      border: '4px solid #dc2626',
+      background: '#fff',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      flexShrink: 0,
+    }}>
+      {!isEmpty && (
+        <span style={{
+          fontSize: maxSpeed >= 100 ? 14 : 16,
+          fontWeight: 800, color: '#1a1a1a', lineHeight: 1,
+        }}>{maxSpeed}</span>
+      )}
+    </div>
+  );
+}
+
+function streetViewUrl(lat, lng) {
+  return `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${lat},${lng}`;
+}
+
 function PointInfo({ feature, label }) {
   if (!feature) return null;
   const props = feature.properties || {};
@@ -17,10 +41,25 @@ function PointInfo({ feature, label }) {
       {road && (
         <div className="info-row"><span className="info-label">Road</span><span className="info-value">{road.road_ref || 'N/A'} ({road.road_class})</span></div>
       )}
-      {props.max_speed != null && (
-        <div className="info-row"><span className="info-label">Speed</span><span className="info-value">{props.max_speed} km/h</span></div>
+      {road?.maxspeed_tag != null && (
+        <div className="info-row"><span className="info-label">Max speed</span><span className="info-value">{road.maxspeed_tag}</span></div>
       )}
-      <div className="info-row"><span className="info-label">Coords</span><span className="info-value">{lat.toFixed(5)}, {lng.toFixed(5)}</span></div>
+      <div className="info-row">
+        <span className="info-label">Coords</span>
+        <span className="info-value">
+          {lat.toFixed(5)}, {lng.toFixed(5)}
+          {' '}
+          <a
+            href={streetViewUrl(lat, lng)}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open in Google Street View"
+            style={{ color: '#3b82f6', fontSize: 11, textDecoration: 'none' }}
+          >
+            Street View ↗
+          </a>
+        </span>
+      </div>
     </div>
   );
 }
@@ -31,6 +70,8 @@ export default function PolylineSidebar({
   processedCount,
   currentSectionIndex,
   currentSection,
+  originalMidPoints,
+  removedMidIndices,
   directionsResult,
   isLoadingDirections,
   directionsError,
@@ -40,16 +81,25 @@ export default function PolylineSidebar({
   onContinue,
   onDisregard,
   onUndo,
+  onRemoveSplitPoint,
+  onRemoveAllSplitPoints,
   canContinue,
   canUndo,
   onFinish,
   storageWarning,
   disregardedCount,
+  customDescription,
+  onCustomDescriptionChange,
 }) {
   const progressPct = totalSections > 0 ? (processedCount / totalSections) * 100 : 0;
   const storageBytes = getStorageUsageBytes();
   const midPoints = currentSection?.mid_points || [];
   const subSectionCount = midPoints.length + 1;
+  const startMaxSpeed = currentSection?.start?.properties?.max_speed;
+  const originalMids = originalMidPoints || [];
+  const removedSet = removedMidIndices || new Set();
+  const hasRemovals = removedSet.size > 0;
+  const remainingCount = originalMids.length - removedSet.size;
 
   return (
     <div className="sidebar" style={isMovingPoint ? { opacity: 0.5, pointerEvents: 'none', position: 'relative' } : {}}>
@@ -92,11 +142,32 @@ export default function PolylineSidebar({
       {!isFinished && currentSection && (
         <>
           <div className="sidebar-section">
-            <h3>Section {currentSectionIndex + 1} of {totalSections}</h3>
-            {midPoints.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: midPoints.length > 0 ? 8 : 0 }}>
+              <h3 style={{ marginBottom: 0 }}>Section {currentSectionIndex + 1} of {totalSections}</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {startMaxSpeed !== undefined && currentSection.start.properties?.is_variable && (
+                  <span style={{
+                    fontSize: 10, fontWeight: 600, color: '#d97706',
+                    background: '#fef3c7', padding: '2px 6px', borderRadius: 4,
+                    lineHeight: 1.2,
+                  }}>VAR</span>
+                )}
+                {startMaxSpeed !== undefined && !currentSection.start.properties?.is_variable && (
+                  <span style={{
+                    fontSize: 10, fontWeight: 600, color: '#6b7280',
+                    background: '#f3f4f6', padding: '2px 6px', borderRadius: 4,
+                    lineHeight: 1.2,
+                  }}>FIXED</span>
+                )}
+                <SpeedLimitSign maxSpeed={startMaxSpeed} />
+              </div>
+            </div>
+            {originalMids.length > 0 && (
               <div className="info-row">
                 <span className="info-label">Mid points</span>
-                <span className="info-value">{midPoints.length} ({subSectionCount} sub-sections)</span>
+                <span className="info-value">
+                  {hasRemovals ? `${remainingCount} of ${originalMids.length}` : originalMids.length} ({subSectionCount} sub-section{subSectionCount !== 1 ? 's' : ''})
+                </span>
               </div>
             )}
           </div>
@@ -109,19 +180,72 @@ export default function PolylineSidebar({
             <PointInfo feature={currentSection.end} label="End point (red)" />
           </div>
 
-          {midPoints.length > 0 && (
+          {originalMids.length > 0 && (
             <div className="sidebar-section">
-              <h3>Split Points ({midPoints.length})</h3>
+              <h3>Split Points ({remainingCount})</h3>
               <ul className="mid-list">
-                {midPoints.map((mp, i) => (
-                  <li key={mp.properties?.id || i}>
-                    <span className="mid-order">{i + 1}</span>
-                    <span className="mid-id" style={{ fontSize: 12 }}>
-                      {mp.properties?.id || `Mid ${i + 1}`}
-                    </span>
-                  </li>
-                ))}
+                {originalMids.map((mp, i) => {
+                  if (removedSet.has(i)) return null;
+                  return (
+                    <li key={mp.properties?.id || i}>
+                      <span className="mid-order">{i + 1}</span>
+                      <span className="mid-id" style={{ fontSize: 12 }}>
+                        {mp.properties?.id || `Mid ${i + 1}`}
+                        {(() => {
+                          const [mLng, mLat] = mp.geometry.coordinates;
+                          return (
+                            <a
+                              href={streetViewUrl(mLat, mLng)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title="Open in Google Street View"
+                              style={{ color: '#3b82f6', fontSize: 10, textDecoration: 'none', marginLeft: 4 }}
+                            >
+                              SV ↗
+                            </a>
+                          );
+                        })()}
+                      </span>
+                      <button
+                        className="btn-remove"
+                        title="Remove this split point"
+                        onClick={() => onRemoveSplitPoint(i)}
+                      >
+                        &times;
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
+              {remainingCount > 1 && (
+                <a
+                  href="#"
+                  onClick={(e) => { e.preventDefault(); onRemoveAllSplitPoints(); }}
+                  style={{
+                    display: 'block', marginTop: 6, fontSize: 12,
+                    color: '#ef4444', textDecoration: 'none',
+                  }}
+                >
+                  Remove all split points
+                </a>
+              )}
+              {remainingCount === 1 && (
+                <a
+                  href="#"
+                  onClick={(e) => { e.preventDefault(); onRemoveAllSplitPoints(); }}
+                  style={{
+                    display: 'block', marginTop: 6, fontSize: 12,
+                    color: '#ef4444', textDecoration: 'none',
+                  }}
+                >
+                  Remove split point
+                </a>
+              )}
+              {hasRemovals && remainingCount === 0 && (
+                <div style={{ fontSize: 12, color: '#6b7280', fontStyle: 'italic', marginTop: 4 }}>
+                  All split points removed — section will be a single A → B polyline.
+                </div>
+              )}
             </div>
           )}
 
@@ -184,6 +308,27 @@ export default function PolylineSidebar({
               ))}
             </div>
           )}
+
+          <div className="sidebar-section">
+            <h3>Operator Notes</h3>
+            <textarea
+              rows={3}
+              value={customDescription}
+              onChange={(e) => onCustomDescriptionChange(e.target.value)}
+              placeholder="Optional comments for this section..."
+              style={{
+                width: '100%',
+                resize: 'vertical',
+                fontSize: 13,
+                padding: '8px 10px',
+                borderRadius: 6,
+                border: '1px solid #d1d5db',
+                fontFamily: 'inherit',
+                lineHeight: 1.4,
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
 
           <div className="sidebar-actions">
             <button className="btn btn-primary" onClick={onContinue} disabled={!canContinue}>
